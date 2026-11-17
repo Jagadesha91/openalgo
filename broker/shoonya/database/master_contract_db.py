@@ -88,20 +88,21 @@ def replace_symtoken_table(frames):
         SymToken.query.delete()
         db_session.bulk_insert_mappings(SymToken, records)
         db_session.commit()
-        logger.info(f"Replaced symtoken table with {len(records)} NIFTY option records")
+        logger.info(f"Replaced symtoken table with {len(records)} NIFTY option & NSE index records")
     except Exception:
         db_session.rollback()
         raise
 
 
-# Download ONLY NFO symbols to keep memory usage minimal
+# Download NFO + NSE (NSE will be filtered strictly to INDEX symbols to keep memory usage minimal)
 shoonya_urls = {
     "NFO": "https://api.shoonya.com/NFO_symbols.txt.zip",
+    "NSE": "https://api.shoonya.com/NSE_symbols.txt.zip",
 }
 
 
 def download_and_unzip_shoonya_data(output_path):
-    logger.info("Downloading and Unzipping Shoonya NFO Data")
+    logger.info("Downloading and Unzipping Shoonya NFO & NSE Data")
 
     if not os.path.exists(output_path):
         os.makedirs(output_path)
@@ -134,6 +135,72 @@ def download_and_unzip_shoonya_data(output_path):
         )
 
     return downloaded_files
+
+
+def process_shoonya_nse_index_data(output_path):
+    """
+    Processes Shoonya NSE data (NSE_symbols.txt) and filters strictly for INDEX symbols (e.g., NIFTY)
+    so NSE_INDEX works for history, indicators, and Auto-ATM strike calculation without RAM bloat.
+    """
+    logger.info("Processing Shoonya NSE Index Data (INDEX Only)")
+    file_path = f"{output_path}/NSE_symbols.txt"
+
+    df = pd.read_csv(
+        file_path,
+        usecols=[
+            "Exchange",
+            "Token",
+            "LotSize",
+            "Symbol",
+            "TradingSymbol",
+            "Instrument",
+            "TickSize",
+        ],
+    )
+
+    df.columns = [
+        "exchange",
+        "token",
+        "lotsize",
+        "name",
+        "brsymbol",
+        "instrumenttype",
+        "tick_size",
+    ]
+
+    df = drop_incomplete_rows(df, "NSE")
+
+    # Filter strictly for INDEX instruments (NIFTY, BANKNIFTY, etc.)
+    df = df[df["instrumenttype"] == "INDEX"].copy()
+
+    # Map Shoonya index names to OpenAlgo standard symbols
+    index_map = {
+        "Nifty 50": "NIFTY",
+        "Nifty Bank": "BANKNIFTY",
+        "Nifty Fin Service": "FINNIFTY",
+        "NIFTY MID SELECT": "MIDCPNIFTY",
+        "India VIX": "INDIAVIX",
+    }
+    df["symbol"] = df["name"].replace(index_map)
+    df["exchange"] = "NSE_INDEX"
+    df["brexchange"] = "NSE"
+    df["expiry"] = ""
+    df["strike"] = -1
+
+    columns_to_keep = [
+        "symbol",
+        "brsymbol",
+        "name",
+        "exchange",
+        "brexchange",
+        "token",
+        "expiry",
+        "strike",
+        "lotsize",
+        "instrumenttype",
+        "tick_size",
+    ]
+    return df[columns_to_keep]
 
 
 def process_shoonya_nfo_data(output_path):
@@ -243,7 +310,7 @@ def delete_shoonya_temp_data(output_path):
 
 
 def master_contract_download():
-    logger.info("Downloading Shoonya Master Contract (NIFTY Options Only)")
+    logger.info("Downloading Shoonya Master Contract (NIFTY Options + NSE Indices)")
 
     output_path = os.path.join("tmp", "shoonya")
     try:
@@ -251,6 +318,7 @@ def master_contract_download():
 
         frames = [
             ("NFO", process_shoonya_nfo_data(output_path)),
+            ("NSE_INDEX", process_shoonya_nse_index_data(output_path)),
         ]
         replace_symtoken_table(frames)
 
@@ -258,7 +326,7 @@ def master_contract_download():
 
         return socketio.emit(
             "master_contract_download",
-            {"status": "success", "message": "Successfully Downloaded NIFTY Options"},
+            {"status": "success", "message": "Successfully Downloaded NIFTY Options & NSE Indices"},
         )
     except Exception as e:
         logger.exception(f"Shoonya master contract download failed: {e}")
